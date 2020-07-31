@@ -1,3 +1,14 @@
+use smelling_salts::{Device, Watcher};
+
+use std::{
+    convert::TryInto,
+    future::Future,
+    mem,
+    os::raw::{c_void, c_int, c_uint},
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 /// Type of the buffer
 #[repr(C)]
 enum V4l2BufType {
