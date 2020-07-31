@@ -3,39 +3,50 @@ use smelling_salts::{Device, Watcher};
 use std::{
     convert::TryInto,
     future::Future,
-    mem,
-    os::raw::{c_void, c_int, c_uint},
+    mem::{size_of, MaybeUninit},
+    os::{
+        raw::{c_void, c_int, c_uint, c_ulong, c_long},
+        unix::{fs::OpenOptionsExt, io::IntoRawFd},
+    },
     pin::Pin,
     task::{Context, Poll},
+    fs::OpenOptions,
 };
+
+#[repr(C)]
+struct TimeVal {
+    // struct timeval, from C.
+    tv_sec: c_long,
+    tv_usec: c_long,
+}
 
 /// Type of the buffer
 #[repr(C)]
 enum V4l2BufType {
     /// Buffer of a single-planar video capture stream, see Video Capture Interface.
-    VIDEO_CAPTURE =	1,
+    VideoCapture =	1,
     /// Buffer of a multi-planar video capture stream, see Video Capture Interface.
-    VIDEO_CAPTURE_MPLANE = 9,
+    VideoCaptureMPlane = 9,
     /// Buffer of a single-planar video output stream, see Video Output Interface.
-    VIDEO_OUTPUT = 2,
+    VideoOutput = 2,
     /// Buffer of a multi-planar video output stream, see Video Output Interface.
-    VIDEO_OUTPUT_MPLANE =	10,
+    VideoOutputMPlane =	10,
     /// Buffer for video overlay, see Video Overlay Interface.
-    VIDEO_OVERLAY =	3, 	
+    VideoOverlay =	3, 	
     /// Buffer of a raw VBI capture stream, see Raw VBI Data Interface.
-    VBI_CAPTURE = 	4,
+    VbiCapture = 	4,
     /// Buffer of a raw VBI output stream, see Raw VBI Data Interface.
-    VBI_OUTPUT =	5,
+    VbiOutput =	5,
     /// Buffer of a sliced VBI capture stream, see Sliced VBI Data Interface.
-    SLICED_VBI_CAPTURE =	6,
+    SlicedVbiCapture =	6,
     /// Buffer of a sliced VBI output stream, see Sliced VBI Data Interface.
-    SLICED_VBI_OUTPUT =	7,
+    SlicedVbiOutput =	7,
     /// Buffer for video output overlay (OSD), see Video Output Overlay Interface.
-    VIDEO_OUTPUT_OVERLAY =	8,
+    VideoOutputOverlay =	8,
     /// Buffer for Software Defined Radio (SDR) capture stream, see Software Defined Radio Interface (SDR).
-    SDR_CAPTURE =	11,
+    SdrCapture =	11,
     /// Buffer for Software Defined Radio (SDR) output stream, see Software Defined Radio Interface (SDR).
-    SDR_OUTPUT =	12,
+    SdrOutput =	12,
 }
 
 #[repr(C)]
@@ -127,6 +138,42 @@ struct V4l2Window {
 }
 
 #[repr(C)]
+struct V4l2Timecode {
+    type_: u32,
+    flags: u32,
+    frames: u8,
+    seconds: u8,
+    minutes: u8,
+    hours: u8,
+    userbits: [u8; 4],
+}
+
+#[repr(C)]
+union V4l2BufferUnion {
+    offset: u32,
+    userptr: c_ulong
+}
+
+#[repr(C)]
+struct V4l2Buffer {
+    index: u32,
+    type_: V4l2BufType,
+    bytesused: u32,
+    flags: u32,
+    field: V4l2Field,
+    timestamp: TimeVal,
+    timecode: V4l2Timecode,
+    sequence: u32,
+
+    /* memory location */
+    memory: V4l2Memory,
+    m: V4l2BufferUnion,
+    length: u32,
+    input: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
 struct V4l2VbiFormat {
     sampling_rate: u32,     /* in 1 Hz */
     offset: u32,
@@ -140,9 +187,9 @@ struct V4l2VbiFormat {
 
 #[repr(C)]
 union V4l2FormatUnion {
-    pix: V4l2PixFormat,     // V4L2_BUF_TYPE_VIDEO_CAPTURE
-    win: V4l2Window,        // V4L2_BUF_TYPE_VIDEO_OVERLAY
-    vbi: V4l2VbiFormat,     // V4L2_BUF_TYPE_VBI_CAPTURE
+    pix: V4l2PixFormat,     // V4l2BufType::VideoCapture
+    win: V4l2Window,        // V4l2BufType::VideoOverlay
+    vbi: V4l2VbiFormat,     // V4l2BufType::VbiCapture
     raw_data: [u8; 200],    // user-defined
 }
 
@@ -153,30 +200,51 @@ struct V4l2Format {
     fmt: V4l2FormatUnion,
 }
 
+#[repr(C)]
+enum V4l2Memory {
+    Mmap = 1,
+    UserPtr = 2,
+    MemoryOverlay = 3,
+}
+
+#[repr(C)]
+struct V4l2RequestBuffers {
+    count: u32,
+    type_: V4l2BufType,
+    memory: V4l2Memory,
+    reserved: [u32; 2],
+}
 
 /// IOCTL
 const fn iow_v(size: usize, num: u8) -> c_int {
-    (0x80 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num
+    (0x80 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num as c_int
 }
 const fn ior_v(size: usize, num: u8) -> c_int {
-    (0x40 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num
+    (0x40 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num as c_int
 }
 const fn iowr_v(size: usize, num: u8) -> c_int {
-    (0xc0 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num
+    (0xc0 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num as c_int
 }
-const VIDIOC_STREAMON: c_int = iow_v(mem::size_of::<c_int>(), 18);
-const VIDIOC_STREAMOFF: c_int = iow_v(mem::size_of::<c_int>(), 19);
-const VIDIOC_QUERYCAP: c_int = ior_v(mem::size_of::<V4l2Capability>(), 0);
-const VIDIOC_S_FMT: c_int = iowr_v(mem::size_of::<V4l2Format>(), 5);
-const VIDIOC_REQBUFS: c_int = iowr_v(mem::size_of::<v4l2_requestbuffers>(), 8);
-const VIDIOC_QUERYBUF: c_int = iowr_v(mem::size_of::<v4l2_buffer>(), 9);
-const VIDIOC_QBUF: c_int = iowr_v(mem::size_of::<v4l2_buffer>(), 15);
-const VIDIOC_DQBUF: c_int = iowr_v(mem::size_of::<v4l2_buffer>(), 17);
+const VIDIOC_STREAMON: c_int = iow_v(size_of::<c_int>(), 18);
+const VIDIOC_STREAMOFF: c_int = iow_v(size_of::<c_int>(), 19);
+const VIDIOC_QUERYCAP: c_int = ior_v(size_of::<V4l2Capability>(), 0);
+const VIDIOC_S_FMT: c_int = iowr_v(size_of::<V4l2Format>(), 5);
+const VIDIOC_REQBUFS: c_int = iowr_v(size_of::<V4l2RequestBuffers>(), 8);
+const VIDIOC_QUERYBUF: c_int = iowr_v(size_of::<V4l2Buffer>(), 9);
+const VIDIOC_QBUF: c_int = iowr_v(size_of::<V4l2Buffer>(), 15);
+const VIDIOC_DQBUF: c_int = iowr_v(size_of::<V4l2Buffer>(), 17);
+
+const fn v4l2_fourcc(a: [u8; 4]) -> u32 {
+    (((a[0] as u32)<<0)|((a[1] as u32)<<8)|((a[2] as u32)<<16)|((a[3] as u32)<<24))
+}
+
+const V4L2_PIX_FMT_MJPEG: u32 = v4l2_fourcc('M','J','P','G');
 
 fn xioctl(fd: c_int, request: c_int, arg: *mut c_void) -> c_int {
+    // Keep going until syscall is not interrupted.
     loop {
         match ioctl(fd, request, arg) {
-            -1 if EINTR == errno => {}
+            -1 if errno() == 4 /*EINTR*/ => {}
             r => break r,
         }
     }
@@ -209,7 +277,7 @@ impl Rig {
 pub struct Camera {
 	// Linux specific
 	buffer: *mut c_void,
-	buf: v4l2_buffer,
+	buf: V4l2Buffer,
 
 	// 
 	data: *mut c_void, // JPEG file data
@@ -217,7 +285,7 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn new(w: u16, h: u16, output: *mut *mut c_void) -> Option<Camera>
+    pub fn new(w: u32, h: u32, output: *mut *mut c_void) -> Option<Camera>
     {
 	    // Open the device
         let filename = "/dev/video0";
@@ -229,7 +297,7 @@ impl Camera {
             .open(filename)
         {
             Ok(f) => f.into_raw_fd(),
-            Err(e) => Error::Io(e),
+            Err(e) => return None,
         };
         if fd == -1 {
             return None;
@@ -241,13 +309,12 @@ impl Camera {
 	    // Is it available?
 	    let caps: V4l2Capability = MaybeUninit::uninit();
 	    if (xioctl(fd, VIDIOC_QUERYCAP, caps.as_mut_ptr()) == -1) {
-		    ERROR("Querying Capabilites\n");
-		    return car_error;
+		    panic!("Failed Querying Capabilites\n");
 	    }
 
 	    // Set image format.
 	    let fmt = V4l2Format {
-	        type_: V4l2BufType::VIDEO_CAPTURE,
+	        type_: V4l2BufType::VideoCapture,
 	        fmt: V4l2FormatUnion {
 	            pix: V4l2PixFormat {
             	    width: w,
@@ -264,11 +331,13 @@ impl Camera {
 	    }
 
 	    // Request a video capture buffer.
-	    struct v4l2_requestbuffers req;
-	    CLEAR(req);
-	    req.count = 1;
-	    req.type = V4l2BufType::VIDEO_CAPTURE;
-	    req.memory = V4L2_MEMORY_MMAP;
+	    let req = V4l2RequestBuffers {
+	        count: 1,
+	        type_: V4l2BufType::VideoCapture,
+	        memory: V4L2_MEMORY_MMAP,
+	        reserved: [0; 2],
+	    };
+
 	     
 	    if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req))
 	    {
@@ -278,7 +347,7 @@ impl Camera {
 
 	    // Query buffer
 	    CLEAR(buf);
-	    buf.type = V4l2BufType::VIDEO_CAPTURE;
+	    buf.type_ = V4l2BufType::VideoCapture;
 	    buf.memory = V4L2_MEMORY_MMAP;
 	    buf.index = 0;
 	    if(-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf)) {
@@ -287,11 +356,11 @@ impl Camera {
 	    }
 	    *output = mmap (NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED,
 		    fd, buf.m.offset);
-	    camera->size = buf.length;
+	    camera.size = buf.length;
 
 	    // Start the capture:
 	    CLEAR(buf);
-	    buf.type = V4l2BufType::VIDEO_CAPTURE;
+	    buf.type_ = V4l2BufType::VideoCapture;
 	    buf.memory = V4L2_MEMORY_MMAP;
 	    buf.index = 0;
 
@@ -300,9 +369,8 @@ impl Camera {
 		    return car_error;
 	    }
 
-	    enum v4l2_buf_type type;
-	    type = V4l2BufType::VIDEO_CAPTURE;
-	    if (xioctl(fd, VIDIOC_STREAMON, &type) == -1) {
+	    let mut type_ = V4l2BufType::VideoCapture;
+	    if (xioctl(fd, VIDIOC_STREAMON, (&mut type_ as *mut V4l2BufType).cast()) == -1) {
 		    ERROR("VIDIOC_STREAMON");
 		    return car_error;
 	    }
@@ -314,18 +382,15 @@ impl Future for Camera {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &Context<'_>) -> Poll<Self::Output> {
-	    if(r == -1) {
-		    if (errno() == EINTR) goto CAR_CAMERA_LOOP;
-		    ERROR("Waiting for Frame\n");
-		    return car_error;
-	    }
-
-	    CLEAR(buf);
-	    buf.type = V4l2BufType::VIDEO_CAPTURE;
-	    buf.memory = V4L2_MEMORY_MMAP;
+	    CLEAR(self.buf);
+	    self.buf.type_ = V4l2BufType::VideoCapture;
+	    self.buf.memory = V4L2_MEMORY_MMAP;
 	    if(xioctl(fd, VIDIOC_DQBUF, &buf) == -1) {
-		    if(errno == EAGAIN) goto CAR_CAMERA_LOOP;
-		    ERROR("Retrieving Frame %s\n", strerror(errno));
+	        let errno = errno();
+		    if(errno == EAGAIN) {
+		        return Poll::Pending;
+	        }
+		    panic!("Error retrieving frame {}\n", errno);
 		    close(fd);
 		    return car_error;
 	    }
@@ -340,8 +405,8 @@ impl Future for Camera {
 
 impl Drop for Camera {
     fn drop(&mut self) {
-	    let type_ = V4l2BufType::VIDEO_CAPTURE;
-	    if (xioctl(fd, VIDIOC_STREAMOFF, &type_) == -1) {
+	    let mut type_ = V4l2BufType::VideoCapture;
+	    if (xioctl(fd, VIDIOC_STREAMOFF, (&mut type_ as *mut V4l2BufType).cast()) == -1) {
 		    ERROR("VIDIOC_STREAMOFF");
 		    return car_error;
 	    }
