@@ -5,9 +5,10 @@ use std::{
     future::Future,
     mem::{size_of, MaybeUninit},
     os::{
-        raw::{c_void, c_int, c_uint, c_ulong, c_long},
+        raw::{c_void, c_int, c_ulong, c_long},
         unix::{fs::OpenOptionsExt, io::IntoRawFd},
     },
+    ptr::null_mut,
     pin::Pin,
     task::{Context, Poll},
     fs::OpenOptions,
@@ -22,6 +23,7 @@ struct TimeVal {
 
 /// Type of the buffer
 #[repr(C)]
+#[allow(unused)]
 enum V4l2BufType {
     /// Buffer of a single-planar video capture stream, see Video Capture Interface.
     VideoCapture =	1,
@@ -60,6 +62,8 @@ struct V4l2Capability {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(unused)]
 enum V4l2Field {
     /// Driver can choose from none, top, bottom, interlaced depending on
     /// whatever it thinks is approximate ...
@@ -81,7 +85,11 @@ enum V4l2Field {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(unused)]
 enum V4l2Colorspace {
+    /// Let the driver choose
+    Unset = 0,
     /// ITU-R 601 -- broadcast NTSC/PAL
     Smpte170M = 1,
     /// 1125-Line (US) HDTV
@@ -102,6 +110,7 @@ enum V4l2Colorspace {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct V4l2PixFormat {
     width: u32,
     height: u32,
@@ -114,6 +123,7 @@ struct V4l2PixFormat {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct V4l2Rect {
      left: i32,
      top: i32,
@@ -122,12 +132,14 @@ struct V4l2Rect {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct V4l2Clip {
     c: V4l2Rect,
     next: *mut V4l2Clip,
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct V4l2Window {
      w: V4l2Rect,
      field: V4l2Field,
@@ -174,6 +186,7 @@ struct V4l2Buffer {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 struct V4l2VbiFormat {
     sampling_rate: u32,     /* in 1 Hz */
     offset: u32,
@@ -201,6 +214,7 @@ struct V4l2Format {
 }
 
 #[repr(C)]
+#[allow(unused)]
 enum V4l2Memory {
     Mmap = 1,
     UserPtr = 2,
@@ -216,34 +230,39 @@ struct V4l2RequestBuffers {
 }
 
 /// IOCTL
-const fn iow_v(size: usize, num: u8) -> c_int {
-    (0x80 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num as c_int
+const fn iow_v(size: usize, num: u8) -> c_ulong {
+    (0x80 << 24) | ((size as c_ulong & 0x1fff) << 16) | ((b'V' as c_ulong) << 8) | num as c_ulong
 }
-const fn ior_v(size: usize, num: u8) -> c_int {
-    (0x40 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num as c_int
+const fn ior_v(size: usize, num: u8) -> c_ulong {
+    (0x40 << 24) | ((size as c_ulong & 0x1fff) << 16) | ((b'V' as c_ulong) << 8) | num as c_ulong
 }
-const fn iowr_v(size: usize, num: u8) -> c_int {
-    (0xc0 << 24) | ((size as c_int & 0x1fff) << 16) | ((b'V' as c_int) << 8) | num as c_int
+const fn iowr_v(size: usize, num: u8) -> c_ulong {
+    (0xc0 << 24) | ((size as c_ulong & 0x1fff) << 16) | ((b'V' as c_ulong) << 8) | num as c_ulong
 }
-const VIDIOC_STREAMON: c_int = iow_v(size_of::<c_int>(), 18);
-const VIDIOC_STREAMOFF: c_int = iow_v(size_of::<c_int>(), 19);
-const VIDIOC_QUERYCAP: c_int = ior_v(size_of::<V4l2Capability>(), 0);
-const VIDIOC_S_FMT: c_int = iowr_v(size_of::<V4l2Format>(), 5);
-const VIDIOC_REQBUFS: c_int = iowr_v(size_of::<V4l2RequestBuffers>(), 8);
-const VIDIOC_QUERYBUF: c_int = iowr_v(size_of::<V4l2Buffer>(), 9);
-const VIDIOC_QBUF: c_int = iowr_v(size_of::<V4l2Buffer>(), 15);
-const VIDIOC_DQBUF: c_int = iowr_v(size_of::<V4l2Buffer>(), 17);
+const VIDIOC_STREAMON: c_ulong = iow_v(size_of::<c_int>(), 18);
+const VIDIOC_STREAMOFF: c_ulong = iow_v(size_of::<c_int>(), 19);
+const VIDIOC_QUERYCAP: c_ulong = ior_v(size_of::<V4l2Capability>(), 0);
+const VIDIOC_S_FMT: c_ulong = iowr_v(size_of::<V4l2Format>(), 5);
+const VIDIOC_REQBUFS: c_ulong = iowr_v(size_of::<V4l2RequestBuffers>(), 8);
+const VIDIOC_QUERYBUF: c_ulong = iowr_v(size_of::<V4l2Buffer>(), 9);
+const VIDIOC_QBUF: c_ulong = iowr_v(size_of::<V4l2Buffer>(), 15);
+const VIDIOC_DQBUF: c_ulong = iowr_v(size_of::<V4l2Buffer>(), 17);
 
-const fn v4l2_fourcc(a: [u8; 4]) -> u32 {
-    (((a[0] as u32)<<0)|((a[1] as u32)<<8)|((a[2] as u32)<<16)|((a[3] as u32)<<24))
+const fn v4l2_fourcc(a: &[u8; 4]) -> u32 {
+    ((a[0] as u32)<<0)|((a[1] as u32)<<8)|((a[2] as u32)<<16)|((a[3] as u32)<<24)
 }
 
-const V4L2_PIX_FMT_MJPEG: u32 = v4l2_fourcc('M','J','P','G');
+const V4L2_PIX_FMT_MJPEG: u32 = v4l2_fourcc(b"MJPG");
 
-fn xioctl(fd: c_int, request: c_int, arg: *mut c_void) -> c_int {
+const PROT_READ: c_int = 0x04;
+const PROT_WRITE: c_int = 0x02;
+
+const MAP_SHARED: c_int = 0x0010;
+
+fn xioctl(fd: c_int, request: c_ulong, arg: *mut c_void) -> c_int {
     // Keep going until syscall is not interrupted.
     loop {
-        match ioctl(fd, request, arg) {
+        match unsafe { ioctl(fd, request, arg) } {
             -1 if errno() == 4 /*EINTR*/ => {}
             r => break r,
         }
@@ -257,6 +276,8 @@ fn errno() -> c_int {
 
 extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    fn mmap(addr: *mut c_void, length: usize, prot: c_int, flags: c_int,
+        fd: c_int, offset: isize) -> *mut c_void;
     fn munmap(addr: *mut c_void, length: usize) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn __errno_location() -> *mut c_int;
@@ -275,6 +296,9 @@ impl Rig {
 
 /// A camera / webcam in the `Rig`.
 pub struct Camera {
+    // Camera device to watch for events.
+    device: Device,
+
 	// Linux specific
 	buffer: *mut c_void,
 	buf: V4l2Buffer,
@@ -297,7 +321,7 @@ impl Camera {
             .open(filename)
         {
             Ok(f) => f.into_raw_fd(),
-            Err(e) => return None,
+            Err(_e) => return None,
         };
         if fd == -1 {
             return None;
@@ -307,117 +331,134 @@ impl Camera {
 	    
 
 	    // Is it available?
-	    let caps: V4l2Capability = MaybeUninit::uninit();
-	    if (xioctl(fd, VIDIOC_QUERYCAP, caps.as_mut_ptr()) == -1) {
+	    let mut caps: MaybeUninit<V4l2Capability> = MaybeUninit::uninit();
+	    if xioctl(fd, VIDIOC_QUERYCAP, caps.as_mut_ptr().cast()) == -1 {
 		    panic!("Failed Querying Capabilites\n");
 	    }
 
 	    // Set image format.
-	    let fmt = V4l2Format {
+	    let mut fmt = V4l2Format {
 	        type_: V4l2BufType::VideoCapture,
 	        fmt: V4l2FormatUnion {
 	            pix: V4l2PixFormat {
             	    width: w,
 	                height: h,
 	                pixelformat: V4L2_PIX_FMT_MJPEG,
-	                field: V4L2_FIELD_NONE,
+	                field: V4l2Field::None,
+                    bytesperline: 0,
+                    sizeimage: 0,
+                    colorspace: V4l2Colorspace::Unset,
+                    private: 0,
 	            },
 	        },
 	    };
 
-	    if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt)) {
-		    ERROR("Error setting Pixel Format\n");
-		    return car_error;
+	    if xioctl(fd, VIDIOC_S_FMT, (&mut fmt as *mut V4l2Format).cast()) == -1 {
+		    panic!("Error setting Pixel Format\n");
 	    }
 
 	    // Request a video capture buffer.
-	    let req = V4l2RequestBuffers {
+	    let mut req = V4l2RequestBuffers {
 	        count: 1,
 	        type_: V4l2BufType::VideoCapture,
-	        memory: V4L2_MEMORY_MMAP,
+	        memory: V4l2Memory::Mmap,
 	        reserved: [0; 2],
 	    };
 
 	     
-	    if (-1 == xioctl(fd, VIDIOC_REQBUFS, &req))
-	    {
-		    ERROR("Requesting Buffer\n");
-		    return car_error;
+	    if xioctl(fd, VIDIOC_REQBUFS, (&mut req as *mut V4l2RequestBuffers).cast()) == -1 {
+		    panic!("Error Requesting Buffer\n");
 	    }
 
 	    // Query buffer
-	    CLEAR(buf);
-	    buf.type_ = V4l2BufType::VideoCapture;
-	    buf.memory = V4L2_MEMORY_MMAP;
-	    buf.index = 0;
-	    if(-1 == xioctl(fd, VIDIOC_QUERYBUF, &buf)) {
-		    ERROR("Querying Buffer\n");
-		    return car_error;
+	    let mut buf = V4l2Buffer {
+	        index: 0,
+            type_: V4l2BufType::VideoCapture,
+            bytesused: 0,
+            flags: 0,
+            field: V4l2Field::Any,
+            timestamp: TimeVal {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            timecode: V4l2Timecode {
+                type_: 0,
+                flags: 0,
+                frames: 0,
+                seconds: 0,
+                minutes: 0,
+                hours: 0,
+                userbits: [0; 4],
+            },
+            sequence: 0,
+            memory: V4l2Memory::Mmap,
+            m: V4l2BufferUnion { userptr: 0 },
+            length: 0,
+            input: 0,
+            reserved: 0,
+	    };
+
+	    if xioctl(fd, VIDIOC_QUERYBUF, (&mut buf as *mut V4l2Buffer).cast()) == -1 {
+		    panic!("Error Querying Buffer\n");
 	    }
-	    *output = mmap (NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED,
-		    fd, buf.m.offset);
-	    camera.size = buf.length;
+	    unsafe { *output = mmap(null_mut(), buf.length.try_into().unwrap(), PROT_READ | PROT_WRITE, MAP_SHARED,
+		    fd, buf.m.offset.try_into().unwrap()) };
 
 	    // Start the capture:
-	    CLEAR(buf);
-	    buf.type_ = V4l2BufType::VideoCapture;
-	    buf.memory = V4L2_MEMORY_MMAP;
-	    buf.index = 0;
-
-	    if (xioctl(fd, VIDIOC_QBUF, &buf) == -1) {
-		    ERROR("VIDIOC_QBUF");
-		    return car_error;
+	    if xioctl(fd, VIDIOC_QBUF, (&mut buf as *mut V4l2Buffer).cast()) == -1 {
+		    panic!("Error: VIDIOC_QBUF");
 	    }
 
 	    let mut type_ = V4l2BufType::VideoCapture;
-	    if (xioctl(fd, VIDIOC_STREAMON, (&mut type_ as *mut V4l2BufType).cast()) == -1) {
-		    ERROR("VIDIOC_STREAMON");
-		    return car_error;
+	    if xioctl(fd, VIDIOC_STREAMON, (&mut type_ as *mut V4l2BufType).cast()) == -1 {
+		    panic!("Error: VIDIOC_STREAMON");
 	    }
-	    return NULL;
+	    
+	    Some(Camera {
+	        device: Device::new(fd, Watcher::new().input()),
+	        size: buf.length,
+	        buf,
+	        buffer: null_mut(),
+	        data: null_mut(),
+	    })
     }
 }
 
 impl Future for Camera {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &Context<'_>) -> Poll<Self::Output> {
-	    CLEAR(self.buf);
-	    self.buf.type_ = V4l2BufType::VideoCapture;
-	    self.buf.memory = V4L2_MEMORY_MMAP;
-	    if(xioctl(fd, VIDIOC_DQBUF, &buf) == -1) {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+	    if xioctl(self.device.fd(), VIDIOC_DQBUF, (&mut self.buf as *mut V4l2Buffer).cast()) == -1 {
 	        let errno = errno();
-		    if(errno == EAGAIN) {
+		    if errno == /*EAGAIN*/11 {
+		        self.device.register_waker(cx.waker());
 		        return Poll::Pending;
 	        }
+	        unsafe {
+    		    close(self.device.fd());
+		    }
 		    panic!("Error retrieving frame {}\n", errno);
-		    close(fd);
-		    return car_error;
 	    }
 
-	    if (xioctl(fd, VIDIOC_QBUF, &buf) == -1) {
-		    ERROR("VIDIOC_QBUF");
-		    return car_error;
+	    if xioctl(self.device.fd(), VIDIOC_QBUF, (&mut self.buf as *mut V4l2Buffer).cast()) == -1 {
+		    panic!("VIDIOC_QBUF");
 	    }
-	    return NULL;
+	    
+	    Poll::Ready(())
     }
 }
 
 impl Drop for Camera {
     fn drop(&mut self) {
 	    let mut type_ = V4l2BufType::VideoCapture;
-	    if (xioctl(fd, VIDIOC_STREAMOFF, (&mut type_ as *mut V4l2BufType).cast()) == -1) {
-		    ERROR("VIDIOC_STREAMOFF");
-		    return car_error;
+	    if xioctl(self.device.fd(), VIDIOC_STREAMOFF, (&mut type_ as *mut V4l2BufType).cast()) == -1 {
+		    panic!("Error VIDIOC_STREAMOFF");
 	    }
-	    if (munmap(self.buffer, self.size) == -1) {
-		    ERROR("munmap");
-		    return car_error;
+	    if unsafe { munmap(self.buffer, self.size.try_into().unwrap()) == -1 } {
+		    panic!("Error munmap");
 	    }
-	    if (close(fd) == -1) {
-		    ERROR("close");
-		    return car_error;
+	    if unsafe { close(self.device.fd()) == -1 }  {
+		    panic!("Error close");
 	    }
-	    return NULL;
     }
 }
