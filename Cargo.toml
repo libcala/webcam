@@ -7,4 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+pix = "0.13"
 smelling_salts = "0.1"
+
+[dev-dependencies]
+pasts = "0.7"

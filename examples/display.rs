@@ -1,9 +1,49 @@
-use camera::Camera;
+use camera::{Rig, Camera};
+use pix::Raster;
+use pix::rgb::SRgba8;
+
+// Raster<SRgba8>
+
+enum Event {
+    // Rig has discovered a new camera.
+    Camera(Camera),
+    // 
+    Picture((usize, ())),
+}
+
+struct State {
+}
+
+impl State {
+    fn event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Camera(_) => println!("New camera"),
+            Event::Picture(_) => println!("Got picture"),
+        }
+        true
+    }
+}
+
+// Asynchronous entry point.
+async fn run() {
+    let mut state = State {
+        
+    };
+    let mut cams = Vec::<Camera>::new();
+    let mut rig = Rig::new();
+    while state.event(pasts::wait! {
+        Event::Camera((&mut rig).await),
+        Event::Picture(pasts::race!(cams)),
+    }) {}
+}
 
 fn main() {
-    let camera = Camera::new();
+    pasts::block_on(run());
+}
 
-	car_camera_t camera;
+/*    let camera = Camera::new();
+
+
 	void* output = NULL;
 //	uint8_t output[640*480*3]; // RGB
 	const char* error;
@@ -28,4 +68,4 @@ fn main() {
 	}
 	printf("Success!\n");
 	return 0;
-}
+}*/

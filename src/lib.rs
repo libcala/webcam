@@ -5,14 +5,29 @@ use std::{
     future::Future,
     mem::{size_of, MaybeUninit},
     os::{
-        raw::{c_void, c_int, c_ulong, c_long},
+        raw::{c_void, c_int, c_ulong, c_long, c_char},
         unix::{fs::OpenOptionsExt, io::IntoRawFd},
     },
     ptr::null_mut,
     pin::Pin,
     task::{Context, Poll},
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
+    collections::HashSet,
+    io::ErrorKind,
 };
+use pix::rgb::SRgba8;
+use pix::Raster;
+
+#[repr(C)]
+struct InotifyEv {
+    // struct inotify_event, from C.
+    wd: c_int, /* Watch descriptor */
+    mask: u32, /* Mask describing event */
+    cookie: u32, /* Unique cookie associating related
+               events (for rename(2)) */
+    len: u32,            /* Size of name field */
+    name: [c_char; 256], /* Optional null-terminated name */
+}
 
 #[repr(C)]
 struct TimeVal {
@@ -279,18 +294,140 @@ extern "C" {
     fn mmap(addr: *mut c_void, length: usize, prot: c_int, flags: c_int,
         fd: c_int, offset: isize) -> *mut c_void;
     fn munmap(addr: *mut c_void, length: usize) -> c_int;
+    fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     fn close(fd: c_int) -> c_int;
     fn __errno_location() -> *mut c_int;
+    fn inotify_init1(flags: c_int) -> c_int;
+    fn inotify_add_watch(fd: c_int, path: *const c_char, mask: u32) -> c_int;
+}
+
+/// 
+pub enum Event {
+    Connect(Box<Camera>),
 }
 
 /// All cameras / webcams that are connected to the operating system.
 pub struct Rig {
+    device: Device,
+    connected: HashSet<String>,
 }
 
 impl Rig {
     pub fn new() -> Self {
-        Rig {
+        // Create an inotify on the directory where video inputs are.
+        let inotify = unsafe {
+            inotify_init1(0o0004000 /*IN_NONBLOCK*/)
+        };
+        if inotify == -1 {
+            panic!("Couldn't create inotify (1)!");
         }
+        if unsafe {
+            inotify_add_watch(
+                inotify,
+                b"/dev/\0".as_ptr() as *const _,
+                0x0000_0200 | 0x0000_0100,
+            )
+        } == -1
+        {
+            panic!("Couldn't create inotify (2)!");
+        }
+
+        // Create watcher, and register with fd as a "device".
+        let watcher = Watcher::new().input();
+        let device = Device::new(inotify, watcher);
+
+        // Start off with an empty hash set of connected devices.
+        let connected = HashSet::new();
+
+        // Return
+        Rig {
+            device,
+            connected,
+        }
+    }
+}
+
+impl Future for Rig {
+    type Output = Camera;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Camera> {
+        // Read an event.
+        let mut ev = MaybeUninit::<InotifyEv>::uninit();
+        let ev = unsafe {
+            if read(
+                self.device.fd(),
+                ev.as_mut_ptr().cast(),
+                std::mem::size_of::<InotifyEv>(),
+            ) <= 0
+            {
+                let mut all_open = true;
+                // Search directory for new video inputs.
+                'fds: for file in fs::read_dir("/dev/").unwrap() {
+                    let file = file.unwrap().file_name().into_string().unwrap();
+                    if file.starts_with("video") {
+                        // Found a camera
+                        if self.connected.contains(&file) {
+                            // Already connected.
+                            continue 'fds;
+                        }
+                        // New gamepad
+                        let mut filename = "/dev/".to_string();
+                        filename.push_str(&file);
+                        let fd = match OpenOptions::new()
+                            .read(true)
+                            .append(true)
+                            .open(filename)
+                        {
+                            Ok(f) => f,
+                            Err(e) => {
+                                if e.kind() == ErrorKind::PermissionDenied {
+                                    all_open = false;
+                                }
+                                continue 'fds;
+                            }
+                        };
+                        self.connected.insert(file);
+                        if let Some(camera) = Camera::new(fd.into_raw_fd(), Raster::with_clear(640, 480)) {
+                            return Poll::Ready(
+                                camera
+                            );
+                        }
+                    }
+                }
+                // Register waker for this device
+                self.device.register_waker(cx.waker());
+                // If no new controllers found, return pending.
+                return Poll::Pending;
+            }
+            ev.assume_init()
+        };
+
+        // Remove flag is set, remove from HashSet.
+        if (ev.mask & 0x0000_0200) != 0 {
+            let mut file = "".to_string();
+            let name = unsafe { std::ffi::CStr::from_ptr(ev.name.as_ptr()) };
+            file.push_str(&name.to_string_lossy());
+            if file.ends_with("-event-joystick") {
+                // Remove it if it exists, sometimes gamepads get "removed"
+                // twice because adds are condensed in innotify (not 100% sure).
+                let _ = self.connected.remove(&file);
+            }
+        }
+        // Check for more events, Search for new controllers again, and return
+        // Pending if neither have anything to process.
+        self.poll(cx)
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        let fd = self.device.fd();
+        self.device.old();
+        assert_ne!(unsafe { close(fd) }, -1);
     }
 }
 
@@ -306,11 +443,13 @@ pub struct Camera {
 	// 
 	data: *mut c_void, // JPEG file data
 	size: u32, // Size of JPEG file
+	
+	// SRGB camera frame data.
+	raster: Raster<SRgba8>,
 }
 
 impl Camera {
-    pub fn new(w: u32, h: u32, output: *mut *mut c_void) -> Option<Camera>
-    {
+    pub fn new(fd: c_int, raster: Raster<SRgba8>) -> Option<Camera> {
 	    // Open the device
         let filename = "/dev/video0";
         let fd = match OpenOptions::new()
@@ -341,8 +480,8 @@ impl Camera {
 	        type_: V4l2BufType::VideoCapture,
 	        fmt: V4l2FormatUnion {
 	            pix: V4l2PixFormat {
-            	    width: w,
-	                height: h,
+            	    width: 0, // w,
+	                height: 0, // h,
 	                pixelformat: V4L2_PIX_FMT_MJPEG,
 	                field: V4l2Field::None,
                     bytesperline: 0,
@@ -401,8 +540,9 @@ impl Camera {
 	    if xioctl(fd, VIDIOC_QUERYBUF, (&mut buf as *mut V4l2Buffer).cast()) == -1 {
 		    panic!("Error Querying Buffer\n");
 	    }
-	    unsafe { *output = mmap(null_mut(), buf.length.try_into().unwrap(), PROT_READ | PROT_WRITE, MAP_SHARED,
-		    fd, buf.m.offset.try_into().unwrap()) };
+        // FIXME: Raster
+	    // unsafe { *output = mmap(null_mut(), buf.length.try_into().unwrap(), PROT_READ | PROT_WRITE, MAP_SHARED,
+		//    fd, buf.m.offset.try_into().unwrap()) };
 
 	    // Start the capture:
 	    if xioctl(fd, VIDIOC_QBUF, (&mut buf as *mut V4l2Buffer).cast()) == -1 {
@@ -420,6 +560,7 @@ impl Camera {
 	        buf,
 	        buffer: null_mut(),
 	        data: null_mut(),
+	        raster,
 	    })
     }
 }
