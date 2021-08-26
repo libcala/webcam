@@ -1,4 +1,4 @@
-use camera::{Rig, Camera};
+use webcam::{Rig, Camera};
 use pix::Raster;
 use pix::rgb::SRgba8;
 
